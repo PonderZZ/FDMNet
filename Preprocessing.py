@@ -30,7 +30,6 @@ class SynapsePreprocessor:
         return self.resampler.Execute(sitk_image)
 
     def clip_and_normalize_hu(self, sitk_image, lower_bound=-125, upper_bound=275):
-        """ Recorta los valores de HU y los normaliza a [0, 1]. """
         np_image = sitk.GetArrayFromImage(sitk_image)
         np_image = np.clip(np_image, lower_bound, upper_bound)
         np_image = (np_image - lower_bound) / (upper_bound - lower_bound)
@@ -46,8 +45,6 @@ def preprocess_synapse_dataset(original_data_path, preprocessed_data_path):
 
     image_files = sorted(glob(os.path.join(original_data_path, 'train_image', '*.nii.gz')))
     label_files = sorted(glob(os.path.join(original_data_path, 'train_labels', '*.nii.gz')))
-
-    # Crear carpetas de destino
     target_img_folder = os.path.join(preprocessed_data_path, 'imagesTr')
     target_lbl_folder = os.path.join(preprocessed_data_path, 'labelsTr')
     os.makedirs(target_img_folder, exist_ok=True)
@@ -58,17 +55,12 @@ def preprocess_synapse_dataset(original_data_path, preprocessed_data_path):
     for img_path, lbl_path in tqdm(zip(image_files, label_files), total=len(image_files), desc="Preprocessing Synapse"):
         try:
             img_filename = os.path.basename(img_path)
-            # lbl_filename = os.path.basename(lbl_path)
             lbl_filename = img_filename.replace('.nii.gz', '_seg.nii.gz')
             assert os.path.basename(lbl_path) == lbl_filename
 
-            # Cargar imágenes
             img_sitk = sitk.ReadImage(img_path, sitk.sitkFloat32)  # Cargar como float para normalización
             lbl_sitk = sitk.ReadImage(lbl_path)
-            # 1. Recortar HU y normalizar a [0, 1]
             img_sitk = preprocessor.clip_and_normalize_hu(img_sitk)
-
-            # 2. Remuestrear a espaciado uniforme
             resampled_img_sitk = preprocessor.resample_image(img_sitk, is_label=False)
             resampled_lbl_sitk = preprocessor.resample_image(lbl_sitk, is_label=True)
 
@@ -80,9 +72,8 @@ def preprocess_synapse_dataset(original_data_path, preprocessed_data_path):
 
 
 if __name__ == '__main__':
-    # --- Configurar rutas ---
-    ORIGINAL_SYNAPSE_PATH = "/home/zgm/ZHF/HDC/Synapse/dataset"
-    PREPROCESSED_SYNAPSE_PATH = "/home/zgm/ZHF/HDC/Synapse/Synapse_preprocessed"
+    ORIGINAL_SYNAPSE_PATH = "...."
+    PREPROCESSED_SYNAPSE_PATH = "....."
 
     preprocess_synapse_dataset(ORIGINAL_SYNAPSE_PATH, PREPROCESSED_SYNAPSE_PATH)
     print("Synapse preprocessing finished!")
