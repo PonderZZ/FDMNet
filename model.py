@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# ==========================================
-# 0. 差分通道注意力
-# ==========================================
 class DSE(nn.Module):
     def __init__(self, channel, reduction=16, lambda_init=0.5):
         super(DSE, self).__init__()
@@ -33,10 +30,6 @@ class DSE(nn.Module):
         w = w_exc - lambda_clamped * w_inh
         w = torch.sigmoid(w).view(b, c, 1, 1)
         return x * w
-
-# ==========================================
-# 1. 动态多窗口MLP
-# ==========================================
 class SpatialGatingUnit(nn.Module):
     def __init__(self, dim, seq_len):
         super().__init__()
@@ -73,7 +66,7 @@ class MultiWindowMLP(nn.Module):
         super().__init__()
         self.dim = dim
         self.window_sizes = window_sizes
-        self.shift = shift  # 移位窗口开关
+        self.shift = shift 
         self.branches = nn.ModuleList([gMLPBlock(dim, ws ** 2) for ws in window_sizes])
         self.fusion_mlp = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -89,16 +82,11 @@ class MultiWindowMLP(nn.Module):
             x_current = x
             h_ori, w_ori = h, w
             pad_h, pad_w = 0, 0
-
-            # ========== 移位窗口核心逻辑 ==========
             if self.shift:
-                # 反射填充半个窗口，实现窗口错位
                 pad_h = ws // 2
                 pad_w = ws // 2
                 x_pad = F.pad(x_current, (pad_w, pad_w, pad_h, pad_h), mode='reflect')
                 _, _, h_pad, w_pad = x_pad.shape
-
-                # 确保填充后尺寸可被窗口整除，不足则额外补全
                 if h_pad % ws != 0:
                     extra_h = (ws - h_pad % ws) % ws
                     x_pad = F.pad(x_pad, (0, 0, 0, extra_h), mode='reflect')
@@ -109,18 +97,13 @@ class MultiWindowMLP(nn.Module):
                 x_current = x_pad
                 h_cur, w_cur = x_current.shape[2], x_current.shape[3]
             else:
-                # 非移位模式：尺寸不匹配则跳过该分支
                 if h % ws != 0 or w % ws != 0:
                     continue
                 h_cur, w_cur = h_ori, w_ori
-
-            # ========== 窗口划分与gMLP建模 ==========
             windows = rearrange(x_current, 'b c (h p1) (w p2) -> (b h w) (p1 p2) c', p1=ws, p2=ws)
             processed = self.branches[i](windows)
             merged = rearrange(processed, '(b h w) (p1 p2) c -> b c (h p1) (w p2)',
                                h=h_cur // ws, w=w_cur // ws, p1=ws, p2=ws)
-
-            # ========== 移位模式裁剪回原始尺寸 ==========
             if self.shift:
                 merged = merged[:, :, pad_h:pad_h + h_ori, pad_w:pad_w + w_ori]
 
@@ -130,7 +113,6 @@ class MultiWindowMLP(nn.Module):
         if not branch_outputs:
             return x
 
-        # ========== 多分支自适应融合（逻辑不变） ==========
         fusion_tensor = torch.zeros(b, c * len(self.window_sizes), h, w, device=x.device)
         for i, out in enumerate(branch_outputs):
             branch_idx = active_indices[i]
@@ -147,20 +129,11 @@ class MultiWindowMLP(nn.Module):
 class DCMLP(nn.Module):
     def __init__(self, in_channels, out_channels, dim=None,
                  large_window_sizes=(4, 8),
-                 small_window_sizes=(2, 4),  # 边界分支改为多尺度窗口
-                 shift=False):  # 全局移位窗口开关
-        """
-        Args:
-            in_channels: 输入通道数
-            out_channels: 输出通道数
-            dim: MLP分支通道数，默认等于out_channels
-            large_window_sizes: 区域分支大窗口组合
-            small_window_sizes: 边界分支小窗口组合（多尺度）
-            shift: 是否启用移位窗口机制
-        """
+                 small_window_sizes=(2, 4), 
+                 shift=False):  
         super().__init__()
         if dim is None:
-            dim = out_channels  # 默认通道数与输出一致
+            dim = out_channels 
 
         self.region_mlp = MultiWindowMLP(dim, large_window_sizes, shift=shift)
         self.boundary_mlp = MultiWindowMLP(dim, small_window_sizes, shift=shift)
@@ -179,8 +152,6 @@ class DCMLP(nn.Module):
         x = self.conv_block(x)
         shortcut = x
         _, _, h, w = x.shape
-
-        # 自适应池化核尺寸（逻辑不变）
         kh, kw = min(h, 3), min(w, 3)
         kh -= 1 if kh % 2 == 0 else 0
         kw -= 1 if kw % 2 == 0 else 0
@@ -194,16 +165,10 @@ class DCMLP(nn.Module):
 
         return shortcut + g_map * self.region_mlp(x_region) + (1 - g_map) * self.boundary_mlp(x_boundary)
 
-# ==========================================
-# 2. 频域分解
-# ==========================================
-
 class Freq_Decomposer(nn.Module):
     def __init__(self, in_channels, init_sigma=0.25):
         super(Freq_Decomposer, self).__init__()
         self.matrix_cache = {}
-
-        # 允许每个通道自适应地决定高低频的截断位置
         self.sigma = nn.Parameter(torch.full((1, in_channels, 1, 1), init_sigma))
 
     def get_matrices_and_grid(self, H, W, device):
@@ -225,8 +190,6 @@ class Freq_Decomposer(nn.Module):
             v = torch.zeros(1, device=device) if H == 1 else torch.arange(H, device=device, dtype=torch.float32) / (
                         H - 1)
             v_grid, u_grid = torch.meshgrid(v, u, indexing='ij')
-
-            # 缓存未平方的距离网格
             dist_sq = (u_grid ** 2 + v_grid ** 2).view(1, 1, H, W)
 
             self.matrix_cache[key] = (dct_h, dct_w, dist_sq)
@@ -239,22 +202,13 @@ class Freq_Decomposer(nn.Module):
 
         dct_matrix_h, dct_matrix_w, dist_sq = self.get_matrices_and_grid(H, W, x.device)
 
-        # 1. 2D DCT
         x_view = x.float().view(B * C, H, W)
         dct_x = torch.matmul(torch.matmul(dct_matrix_h, x_view), dct_matrix_w.transpose(0, 1)).view(B, C, H, W)
-
-        # 2. 动态生成可学习的频率掩码
-        # 限制 sigma 在合理范围内，防止数值溢出或全通/全阻
         safe_sigma = torch.clamp(self.sigma, min=0.01, max=1.0)
-
-        # 每个通道都有一个专属的高斯掩码：e^(-dist / 2*sigma^2)
         mask = torch.exp(-dist_sq / (2 * (safe_sigma ** 2)))
-
-        # 3. 频率分离
         f_low = dct_x * mask
         f_high = dct_x * (1.0 - mask)
 
-        # 5. 2D IDCT
         f_low_view = f_low.view(B * C, H, W)
         low_freq_feat = torch.matmul(torch.matmul(dct_matrix_h.transpose(0, 1), f_low_view), dct_matrix_w).view(B, C, H,
                                                                                                                 W)
@@ -266,15 +220,9 @@ class Freq_Decomposer(nn.Module):
         return high_freq_feat.to(original_dtype), low_freq_feat.to(original_dtype)
 
 class LowFreqChannelAttn(nn.Module):
-    """
-  低频通道注意力: 基于空间-语义交叉相关性 (Spatial-Semantic Cross-Correlation)
-    """
-
     def __init__(self, in_channels, reduction=16):
         super().__init__()
         mid_channels = max(in_channels // reduction, 4)
-
-        # 1. 将低频特征和深层语义特征对齐
         self.proj_low = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(in_channels)
@@ -283,8 +231,6 @@ class LowFreqChannelAttn(nn.Module):
             nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(in_channels)
         )
-
-        # 2. 从共识特征(Consensus)中推导通道权重
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.channel_excitation = nn.Sequential(
             nn.Linear(in_channels, mid_channels, bias=False),
@@ -296,51 +242,29 @@ class LowFreqChannelAttn(nn.Module):
     def forward(self, x_low, g_dec):
         b, c, _, _ = x_low.size()
 
-        # 步骤 1: 特征空间投影
         feat_low = self.proj_low(x_low)
         feat_dec = self.proj_dec(g_dec)
-
-        # 步骤 2: 空间-语义交叉共识 (Element-wise Multiplication)
         consensus_feat = feat_low * feat_dec
 
-        # 步骤 3: 提取共识特征的通道全局统计量
         y = self.avg_pool(consensus_feat).view(b, c)
-
-        # 步骤 4: 生成通道激励权重
         weight = self.channel_excitation(y).view(b, c, 1, 1)
-
-        # 步骤 5: 调制原始低频特征
         return x_low * weight + x_low
 
 class HighFreqSpatialAttn(nn.Module):
-    """
-    语义指导的去噪空间注意力模块 (Semantic-Guided Denoising Spatial Attention)
-    """
 
     def __init__(self, in_channels, init_base=0.001, init_penalty=0.1):
         super().__init__()
         mid_channels = in_channels // 2
 
-        # ==========================================
-        # 1. 语义评估器 (生成 P_sem)
-        # ==========================================
         self.semantic_evaluator = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, 1, kernel_size=1, bias=False),
-            nn.Sigmoid()  # 输出 [0, 1] 的空间概率图 P_sem
+            nn.Sigmoid() 
         )
-
-        # ==========================================
-        # 2. 空间动态软阈值参数
-        # ==========================================
         self.tau_base = nn.Parameter(torch.tensor([init_base], dtype=torch.float32))
         self.tau_penalty = nn.Parameter(torch.tensor([init_penalty], dtype=torch.float32))
-
-        # ==========================================
-        # 3. 加性边界掩码生成器 (基于去噪后的纯净高频)
-        # ==========================================
         self.W_high = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(mid_channels)
@@ -356,48 +280,18 @@ class HighFreqSpatialAttn(nn.Module):
         )
 
     def forward(self, x_high, g_dec):
-        """
-        x_high: 包含(真实边界 + 背景毛发噪声)的原始高频空间特征
-        g_dec: 包含强定位语义的解码器特征
-        """
-
-        # ----------------------------------------------------
-        # 步骤 1: 语义评估与阈值地图生成 (Spatially-Variant Threshold Map)
-        # ----------------------------------------------------
-        # p_sem 维度: [B, 1, H, W]
         p_sem = self.semantic_evaluator(g_dec)
-
-        # 防止阈值为负数
         safe_base = torch.clamp(self.tau_base, min=0.0)
         safe_penalty = torch.clamp(self.tau_penalty, min=0.0)
-
-        # 动态阈值图: 背景区域 (p_sem接近0) 阈值大，病灶区域 (p_sem接近1) 阈值小
         tau_map = safe_base + (1.0 - p_sem) * safe_penalty
-
-        # ----------------------------------------------------
-        # 步骤 2: 解码器指导的空间去噪 (Decoder-Guided Spatial Denoising)
-        # ----------------------------------------------------
-        # 计算高频特征绝对值
         mag = torch.abs(x_high) + 1e-8
-
-        # 对每个空间像素独立应用软阈值截断 (利用广播机制 tau_map: [B, 1, H, W] -> [B, C, H, W])
         scale = torch.relu(mag - tau_map) / mag
-
-        # x_high_clean 现在是一张完美的图: 背景里的高频毛发被清空，病灶边缘的高频细节被完整保留
         x_high_clean = torch.sign(x_high) * scale * mag
-
-        # ----------------------------------------------------
-        # 步骤 3: 提取终极边界掩码 (Additive Gating)
-        # ----------------------------------------------------
         high_proj = self.W_high(x_high_clean)
         dec_proj = self.W_dec(g_dec)
 
         fused_state = high_proj + dec_proj
         spatial_mask = self.psi(fused_state)
-
-        # ----------------------------------------------------
-        # 步骤 4: 返回调制后的干净高频特征
-        # ----------------------------------------------------
         return x_high_clean * spatial_mask + x_high
 
 
@@ -426,13 +320,7 @@ class FrequencyDecoupledSkipConnection(nn.Module):
         x_low_refined = self.low_freq_attn(x_low, g_dec)
         x_high_refined = self.high_freq_attn(x_high, g_dec)
         out = self.fusion(x_low_refined + x_high_refined)
-        # 返回增强后的特征
         return out + x_enc
-
-
-# ==========================================
-# 3. 解码器
-# ==========================================
 class ConvBlock2D(nn.Module):
     def __init__(self, ch_in, ch_out):
         super().__init__()
@@ -545,24 +433,17 @@ class Decoder(nn.Module):
 
         return d4, d3, d2, d1
 
-
-# ==========================================
-# 4. model
-# ==========================================
 class model(nn.Module):
     def __init__(self, in_channels=1, out_channels=4, base_c=32,
                  se_reduction=16, se_lambda_init=0.5,
-                 input_size=256,  # 输入图像尺寸，用于计算比例窗口
-                 use_shift=True):  # 是否启用移位窗口
+                 input_size=256,
+                 use_shift=True):  
         super().__init__()
         ch = [base_c, base_c * 2, base_c * 4, base_c * 8]
         bottle_ch = base_c * 16
-        # 按比例计算各层窗口尺寸（对应原图H/4、H/8、H/16）
-        win_h4 = input_size // 4   # 原图1/4
-        win_h8 = input_size // 8   # 原图1/8
-        win_h16 = input_size // 16 # 原图1/16
-
-        # Encoder（每层传入对应比例的窗口尺寸 + 移位开关）
+        win_h4 = input_size // 4  
+        win_h8 = input_size // 8   
+        win_h16 = input_size // 16 
         self.enc1 = nn.Sequential(
             nn.Conv2d(in_channels, ch[0], 3, padding=1),
             DCMLP(ch[0], ch[0],
@@ -589,8 +470,6 @@ class model(nn.Module):
                           small_window_sizes=(win_h8//8, win_h16//8),
                           shift=use_shift)
         self.down4 = nn.Conv2d(ch[3], ch[3], 2, stride=2)
-
-        # 其余部分（bottleneck、解码器、输出头）保持原代码不变
         self.bottleneck = nn.Sequential(
             nn.Conv2d(ch[3], bottle_ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(bottle_ch), nn.LeakyReLU(inplace=True),
