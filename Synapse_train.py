@@ -8,13 +8,9 @@ import math
 import logging
 import time as _time
 import numpy as np
-from ACDC.file_2D.model_1 import HDC_Net
-# 导入 thop 用于计算参数量和 FLOPs
+from model import model
 from thop import profile, clever_format
-from monai.networks.nets import UNet, AttentionUnet
-from Compare.models import TransUNet, SwinUNet
-from Compare.FocalTransNet import Net as FocalTransNet
-from data_31 import (SynapseNpz2dDataset, SynapseH5ValDataset, ZScoreNormalization2D, Resize2D,
+from data import (SynapseNpz2dDataset, SynapseH5ValDataset, ZScoreNormalization2D, Resize2D,
                      RandomFlip2D, RandomRotate2D, ToTensor2D, ComposeTransforms, MinMaxToMinusOneOne,
                      RandomGaussianNoise2D, RandomScale2D)
 from monai.metrics import HausdorffDistanceMetric
@@ -24,9 +20,6 @@ from monai.losses import DiceCELoss
 
 # ==========================================
 # 1. Loss & Utils
-# ==========================================
-# ==========================================
-# 1. 修复版的 Batch-level DiceLoss (保命神器)
 # ==========================================
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):
@@ -94,15 +87,11 @@ def train_one_epoch_2d(model, dataloader, optimizer, loss_fn, device, scaler):
             outputs = model(images)
             if labels.dim() == 3:
                 labels = labels.unsqueeze(1)  # 变成 [B, 1, H, W]
-
-            # 【核心修改】：开启深监督 (Deep Supervision)
             if isinstance(outputs, (list, tuple)) and len(outputs) > 1:
                 loss = 0.0
-                # 赋予不同尺度的输出不同的权重 (主输出权重最高)
                 weights = [1.0, 0.6, 0.4, 0.2]
                 for idx, out in enumerate(outputs):
                     weight = weights[idx] if idx < len(weights) else 0.1
-                    # 如果辅助输出尺寸变小了，将 label 缩小至对应尺寸 (必须用 nearest 保证类别不变)
                     if out.shape[-2:] != labels.shape[-2:]:
                         target_label = torch.nn.functional.interpolate(
                             labels.float(), size=out.shape[-2:], mode='nearest'
@@ -112,7 +101,6 @@ def train_one_epoch_2d(model, dataloader, optimizer, loss_fn, device, scaler):
 
                     loss += weight * loss_fn(out, target_label)
             else:
-                # 单输出模型兼容
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
                 loss = loss_fn(outputs, labels)
 
@@ -217,12 +205,12 @@ def main():
     NUM_WORKERS = 6
     LEARNING_RATE = 3e-4
     NUM_EPOCHS = 200
-    WARMUP_EPOCHS = 15  # 新增：预热轮数
+    WARMUP_EPOCHS = 15 
 
     NUM_CLASSES = 9
     IMG_SIZE = (224, 224)
 
-    logger.info("📦 Preparing Synapse 2D NPZ dataset...")
+    logger.info("Preparing Synapse 2D NPZ dataset...")
 
     train_transforms = ComposeTransforms([
         Resize2D(IMG_SIZE), RandomFlip2D(prob=0.5), RandomRotate2D(angle_range=(-10, 10)),
@@ -240,12 +228,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS,
                               pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=NUM_WORKERS)
-
-    # model = FocalTransNet(img_size=IMG_SIZE[0], dim_in=1, dim_out=NUM_CLASSES, device=str(DEVICE)).to(DEVICE)
-    # model = HDC_Net(in_channels=1, out_channels=9, base_c=32).to(DEVICE)
-    # model = UNet(spatial_dims=2, in_channels=1, out_channels=9,channels=(32, 64, 128, 256, 512), strides=(2, 2, 2, 2), num_res_units=2).to(DEVICE)
-    # model = MERIT_Cascaded(n_class=9, img_size_s2=(224, 224))
-    # model = FG(seg_classes=9).to(DEVICE)
+    model = mdoel(in_channels=1, out_channels=9, base_c=32).to(DEVICE)
     dummy_input = torch.randn(1, 1, IMG_SIZE[0], IMG_SIZE[1]).to(DEVICE)
     try:
         macs, params = profile(model, inputs=(dummy_input,), verbose=False)
@@ -260,14 +243,11 @@ def main():
 
     def lr_lambda(epoch):
         if epoch < WARMUP_EPOCHS:
-            # 前 15 轮，学习率从 0 线性增长到 1.0 * LEARNING_RATE
             return float(epoch + 1) / float(max(1, WARMUP_EPOCHS))
-        # 之后使用余弦退火衰减
         progress = float(epoch - WARMUP_EPOCHS) / float(max(1, NUM_EPOCHS - WARMUP_EPOCHS))
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
 
     scaler = GradScaler()
 
@@ -295,15 +275,7 @@ def main():
                 best_val_dice = val_metrics['dice']
                 best_dice_per_class = val_metrics['dice_per_class']
                 torch.save(model.state_dict(), os.path.join(OUTPUT_DIR, "best_2d_model.pth"))
-                logger.info(f"🌟 Saved new best model with mDice: {best_val_dice:.4f}")
-
-    logger.info("\n" + "=" * 50)
-    logger.info(f"Training Finished! Model: {MODEL_NAME}")
-    logger.info(f"Best Validation 3D mDice: {best_val_dice:.4f}")
-    logger.info("--- 详细类别 Dice 分数 ---")
-    for class_idx, class_name in SYNAPSE_CLASSES.items():
-        logger.info(f"   - {class_name:<12} (Class {class_idx}): {best_dice_per_class.get(class_idx, 0.0):.4f}")
-    logger.info("=" * 50)
+                logger.info(f" Saved new best model with mDice: {best_val_dice:.4f}")
 
 
 if __name__ == '__main__':
