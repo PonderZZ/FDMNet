@@ -14,29 +14,15 @@ import random
 import numpy as np
 import torch
 import imgaug.augmenters as iaa
-import cv2 as cv
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-# MONAI imports
 from monai.metrics import HausdorffDistanceMetric
 from monai.networks.nets import UNet, AttentionUnet
 from thop import profile, clever_format
-
-# 请确保这些模型文件在同级目录并正确导入
-from ACDC.file_2D.model_1 import HDC_Net
-from Compare.models import TransUNet, SwinUNet
-from Compare.FocalTransNet import Net as FocalTransNet
-from Compare.mkunet_network import MK_UNet
-import imgaug as ia
-
-from plan4 import plan4
+from model import model
 
 
 def mask_to_onehot(mask):
-    """
-    Converts a segmentation mask (H, W, C) to (H, W, K) where the last dim is a one
-    hot encoding vector, C is usually 1 or 3, and K is the number of class.
-    """
     semantic_map = []
     mask = np.expand_dims(mask,-1)
     for colour in range (9):
@@ -77,10 +63,10 @@ class ISIC2018_dataset(Dataset):
 
         self.img_aug = iaa.SomeOf((0, 4), [
             iaa.Flipud(0.5, name="Flipud"),
-            iaa.Fliplr(0.5, name="Fliplr"),  # type: ignore
+            iaa.Fliplr(0.5, name="Fliplr"),  
             iaa.AdditiveGaussianNoise(scale=0.005 * 255),
             iaa.GaussianBlur(sigma=(1.0)),
-            iaa.LinearContrast((0.5, 1.5), per_channel=0.5),  # type: ignore
+            iaa.LinearContrast((0.5, 1.5), per_channel=0.5), 
             iaa.Affine(scale={"x": (0.5, 2), "y": (0.5, 2)}),
             iaa.Affine(rotate=(-40, 40)),
             iaa.Affine(shear=(-16, 16)),
@@ -101,17 +87,17 @@ class ISIC2018_dataset(Dataset):
             x, y, _ = image.shape
 
             if x != self.img_size or y != self.img_size:
-                image = cv.resize(image, (self.img_size, self.img_size), interpolation=cv.INTER_CUBIC)  # type: ignore
-                label = cv.resize(label, (self.img_size, self.img_size), interpolation=cv.INTER_NEAREST)  # type: ignore
+                image = cv.resize(image, (self.img_size, self.img_size), interpolation=cv.INTER_CUBIC)  
+                label = cv.resize(label, (self.img_size, self.img_size), interpolation=cv.INTER_NEAREST)  
         else:
             slice_name = self.sample_list[idx]
             data_path = os.path.join(self.data_dir, slice_name)
             data = np.load(data_path)
-            image, label = data['image'], data['label']  # type: ignore
+            image, label = data['image'], data['label'] 
             x, y, _ = image.shape
 
             if x != self.img_size or y != self.img_size:
-                image = cv.resize(image, (self.img_size, self.img_size), interpolation=cv.INTER_CUBIC)  # type: ignore
+                image = cv.resize(image, (self.img_size, self.img_size), interpolation=cv.INTER_CUBIC) 
                 label = cv.resize(label, (self.img_size, self.img_size), interpolation=cv.INTER_NEAREST)
 
         sample = {'image': image, 'label': label, 'name': slice_name.strip('.pnz')}
@@ -123,12 +109,7 @@ class ISIC2018_dataset(Dataset):
 
 
 class ISIC2018Dataset(Dataset):
-    def __init__(self, data_root, target_size=(224, 224), mode='train'):
-        """
-        :param data_root: npz文件所在目录 (e.g., 'isic/train_npz')
-        :param target_size: 缩放尺寸
-        :param mode: 'train' 或 'val'
-        """
+    def __init__(self, data_root, target_size=(256, 256), mode='train'):
         super().__init__()
         self.mode = mode
         self.target_size = target_size
@@ -141,16 +122,13 @@ class ISIC2018Dataset(Dataset):
         return len(self.file_list)
 
     def augment(self, image, label):
-        """简单的随机数据增强"""
-        # 1. 随机水平翻转
+
         if np.random.rand() > 0.5:
             image = cv2.flip(image, 1)
             label = cv2.flip(label, 1)
-        # 2. 随机垂直翻转
         if np.random.rand() > 0.5:
             image = cv2.flip(image, 0)
             label = cv2.flip(label, 0)
-        # 3. 随机旋转 90, 180, 270度
         k = np.random.randint(0, 4)
         if k > 0:
             image = np.rot90(image, k)
@@ -161,45 +139,27 @@ class ISIC2018Dataset(Dataset):
     def __getitem__(self, idx):
         npz_path = self.file_list[idx]
         data = np.load(npz_path)
-
-        # 假设 npz 中的键名为 'image' 和 'label'
-        # 如果你的键名不同，请在此修改，例如 data['img'], data['mask']
         image = data['image']
         label = data['label']
-
-        # 确保图像为 (H, W, 3) 且标签为 (H, W)
-        if image.ndim == 2:  # 如果碰巧有灰度图，转为RGB
+        if image.ndim == 2: 
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-
-        # 尺寸缩放
         image = cv2.resize(image, (self.target_size[1], self.target_size[0]), interpolation=cv2.INTER_LINEAR)
         label = cv2.resize(label.astype(np.uint8), (self.target_size[1], self.target_size[0]),
                            interpolation=cv2.INTER_NEAREST)
-
-        # 训练集应用数据增强
         if self.mode == 'train':
             image, label = self.augment(image, label)
         image = image.astype(np.float32)
-        if image.max() > 2.0:  # 如果像素值是 0-255
+        if image.max() > 2.0:  
             image = image / 255.0
         label = (label > 0).astype(np.float32)
 
-        # 归一化 (0-255 to 0.0-1.0)
         #image = image.astype(np.float32) / 255.0
-
-        # 确保标签只有 0 和 1 (二分类)
         label = (label > 0).astype(np.float32)
-
-        # 转为 PyTorch Tensor: [H, W, C] -> [C, H, W]
         image_tensor = torch.from_numpy(image.transpose((2, 0, 1)))
         label_tensor = torch.from_numpy(label).unsqueeze(0)  # [1, H, W]
 
         return {'image': image_tensor, 'label': label_tensor, 'name': os.path.basename(npz_path)}
 
-
-# ==========================================
-# 1. Loss Functions (适用于多分类与二分类)
-# ==========================================
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):
         super().__init__()
@@ -215,7 +175,6 @@ class DiceLoss(nn.Module):
         intersection = torch.sum(y_pred * y_true_one_hot, dim=(2, 3))
         sum_probs = torch.sum(y_pred, dim=(2, 3)) + torch.sum(y_true_one_hot, dim=(2, 3))
         dice = (2. * intersection + self.smooth) / (sum_probs + self.smooth)
-        # 对于二分类，dice[:, 1:] 就是只计算前景(病灶)的Dice
         return 1 - dice[:, 1:].mean()
 
 
@@ -266,10 +225,6 @@ class SuperCombinedLoss(nn.Module):
             loss += self.weights[2] * self.ft_loss(logits, labels)
         return loss
 
-
-# ==========================================
-# 2. Training and Validation Engine
-# ==========================================
 def train_one_epoch(model, dataloader, optimizer, loss_fn, device, scaler, accumulation_steps=4):
     model.train()
     running_loss = 0.0
@@ -281,10 +236,8 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, scaler, accum
 
         with autocast():
             outputs = model(images)
-
-            # 兼容支持深度监督(列表输出)和普通(单Tensor输出)的模型
             if isinstance(outputs, (list, tuple)):
-                if len(outputs) > 1:  # 深监督模式
+                if len(outputs) > 1: 
                     loss_main = loss_fn(outputs[0], labels)
                     labels_f = labels.float().unsqueeze(1) if labels.dim() == 3 else labels.float()
                     loss_aux1 = loss_fn(outputs[1], F.max_pool2d(labels_f, 2, 2).long())
@@ -313,14 +266,12 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, scaler, accum
 @torch.no_grad()
 def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=10):
     model.eval()
-
-    # 评估指标记录列表
     dice_scores = []
     iou_scores = []
-    ac_scores = []  # Accuracy (准确率)
-    pr_scores = []  # Precision (精确率)
-    se_scores = []  # Sensitivity/Recall (敏感度/召回率)
-    sp_scores = []  # Specificity (特异度)
+    ac_scores = []  
+    pr_scores = []  
+    se_scores = []  
+    sp_scores = []  
 
     for i, batch in enumerate(tqdm(dataloader, desc="Validating")):
         images, labels = batch['image'].to(device), batch['label'].to(device)
@@ -329,7 +280,6 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
 
         labels_cpu = labels.cpu().squeeze(1) if labels.dim() == 4 else labels.cpu()
 
-        # 解析输出获取预测Mask
         if isinstance(outputs, (list, tuple)):
             if len(outputs) > 1:
                 probs_list = [torch.softmax(o.cpu(), dim=1) for o in outputs]
@@ -347,8 +297,6 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
         for b_idx in range(preds.shape[0]):
             pred_np = preds[b_idx].numpy()
             label_np = labels_cpu[b_idx].numpy()
-
-            # 简单的后处理：保留最大连通域并且闭运算平滑边缘
             pred_post = np.zeros_like(pred_np, dtype=np.uint8)
             class_mask = (pred_np == 1)
             if class_mask.any():
@@ -360,18 +308,14 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
                     final_mask = binary_closing(clean_mask, structure=np.ones((5, 5)))
                     pred_post[final_mask] = 1
 
-            # ==========================================
-            # 核心：计算像素级混淆矩阵 (针对前景病灶=1)
-            # ==========================================
             pred_mask = (pred_post == 1)
             true_mask = (label_np == 1)
 
-            TP = np.sum(pred_mask & true_mask)  # 真正例：预测为病灶，实际为病灶
-            TN = np.sum((~pred_mask) & (~true_mask))  # 真负例：预测为背景，实际为背景
-            FP = np.sum(pred_mask & (~true_mask))  # 假正例：预测为病灶，实际为背景
-            FN = np.sum((~pred_mask) & true_mask)  # 假负例：预测为背景，实际为病灶
+            TP = np.sum(pred_mask & true_mask)  
+            TN = np.sum((~pred_mask) & (~true_mask))  
+            FP = np.sum(pred_mask & (~true_mask))  
+            FN = np.sum((~pred_mask) & true_mask) 
 
-            # 计算各项指标 (加 1e-8 防止除以 0)
             acc = (TP + TN) / (TP + TN + FP + FN + 1e-8)
             se = TP / (TP + FN + 1e-8)
             sp = TN / (TN + FP + 1e-8)
@@ -381,8 +325,6 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
             se_scores.append(se)
             sp_scores.append(sp)
             pr_scores.append(pr)
-
-            # 计算 Dice 和 IoU
             intersection = TP
             union = np.sum(pred_mask) + np.sum(true_mask) - intersection
 
@@ -393,7 +335,6 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
             dice = 2. * intersection / (np.sum(pred_mask) + np.sum(true_mask) + 1e-8)
             dice_scores.append(dice)
 
-            # 保存可视化结果为 PNG (复用你优化过的 save_2d_png)
             if output_folder and b_idx == 0 and (i % save_freq == 0):
                 save_2d_png(images[b_idx], label_np, pred_post, output_folder, epoch, img_names[b_idx])
 
@@ -410,49 +351,26 @@ def validate(model, dataloader, device, output_folder=None, epoch=0, save_freq=1
 def save_2d_png(img_tensor, lbl_np, pred_np, folder, ep, name):
     os.makedirs(folder, exist_ok=True)
     base_name = name.split('.')[0]
-
-    # 1. 处理原图 (引入鲁棒的 Min-Max 归一化，彻底解决全黑问题)
     img_np = img_tensor.cpu().numpy().transpose(1, 2, 0)  # (C, H, W) -> (H, W, C)
 
-    # 动态拉伸到 0-1 之间，再转 0-255，保证图像对比度最佳
     img_min = img_np.min()
     img_max = img_np.max()
     if img_max > img_min:
         img_np = (img_np - img_min) / (img_max - img_min)
     img_np = (img_np * 255).astype(np.uint8)
-
-    # 转为 OpenCV 的 BGR 格式
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-
-    # 2. 处理标签和预测 (0/1 转换为 0/255 的黑白图)
     lbl_img = (lbl_np * 255).astype(np.uint8)
     pred_img = (pred_np * 255).astype(np.uint8)
-
-    # 3. 分别保存: 原图、真值、预测
     cv2.imwrite(os.path.join(folder, f"ep{ep:03d}_{base_name}_img.png"), img_bgr)
     cv2.imwrite(os.path.join(folder, f"ep{ep:03d}_{base_name}_gt.png"), lbl_img)
     cv2.imwrite(os.path.join(folder, f"ep{ep:03d}_{base_name}_pred.png"), pred_img)
-
-    # ==========================================
-    # 4. 可读性优化：生成直观的 Overlay (边界叠加图)
-    # ==========================================
     overlay = img_bgr.copy()
-
-    # 找真值(GT)的轮廓，并用绿色(Green)绘制
     contours_gt, _ = cv2.findContours(lbl_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(overlay, contours_gt, -1, (0, 255, 0), 2)  # 颜色: BGR (0,255,0) -> 绿，线宽: 2
-
-    # 找预测(Pred)的轮廓，并用红色(Red)绘制
+    cv2.drawContours(overlay, contours_gt, -1, (0, 255, 0), 2)  
     contours_pred, _ = cv2.findContours(pred_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(overlay, contours_pred, -1, (0, 0, 255), 2)  # 颜色: BGR (0,0,255) -> 红，线宽: 2
-
-    # 保存叠加图 (对比一目了然：绿线是标准答案，红线是模型预测)
+    cv2.drawContours(overlay, contours_pred, -1, (0, 0, 255), 2) 
     cv2.imwrite(os.path.join(folder, f"ep{ep:03d}_{base_name}_overlay.png"), overlay)
 
-
-# ==========================================
-# 3. Main Script
-# ==========================================
 def setup_logger(path):
     logger = logging.getLogger('TrainLog')
     logger.setLevel(logging.INFO)
@@ -467,34 +385,22 @@ def setup_logger(path):
 
 
 def main():
-    # --- Config ---
-    DATASET = 'ISIC2018'
-
-    # 切换模型: 'HDC_Net', 'FocalTransNet', 'MK_UNet', 'UNet'
-    MODEL_TYPE = 'plan4'
-
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    TRAIN_DATA_ROOT = '..'
+    VAL_DATA_ROOT = '..'
 
-    # --- 替换为你自己的实际路径 ---
-    TRAIN_DATA_ROOT = '/home/zgm/ZHF/HDC/ISIC2018/ISIC2018/train_npz'
-    VAL_DATA_ROOT = '/home/zgm/ZHF/HDC/ISIC2018/ISIC2018/test_npz'
-
-    OUT_DIR = f"./runs_isic/{DATASET}_{MODEL_TYPE}_{time.strftime('%Y%m%d-%H%M')}"
+    OUT_DIR = f"..."
     os.makedirs(OUT_DIR, exist_ok=True)
 
     logger = setup_logger(os.path.join(OUT_DIR, "train.log"))
     logger.info(f"Started {MODEL_TYPE} on {DEVICE}")
-
-    # Hyperparameters
     BATCH_SIZE, NUM_WORKERS = 4, 4
-    LR, EPOCHS, ACCUM = 1e-5, 100, 1  # ISIC 一般收敛较快，可适当减少Epoch
-    TARGET_SIZE = (224, 224)
-    NUM_CLASSES = 2  # ISIC是二分类(0背景，1病灶)
-    IN_CHANNELS = 3  # ISIC是RGB图
+    LR, EPOCHS, ACCUM = 1e-5, 100, 1 
+    TARGET_SIZE = (256, 256)
+    NUM_CLASSES = 2  
+    IN_CHANNELS = 3 
     WARMUP_EPOCHS = 15
 
-
-    # --- Data ---
     train_dataset = ISIC2018Dataset(data_root=TRAIN_DATA_ROOT, target_size=TARGET_SIZE, mode='train')
     val_dataset = ISIC2018Dataset(data_root=VAL_DATA_ROOT, target_size=TARGET_SIZE, mode='val')
 
@@ -502,31 +408,7 @@ def main():
                               drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=NUM_WORKERS)
 
-    # --- Model Hub ---
-    # 【注意】所有模型的 in_channels 必须为 3， 输出类别数为 2
-    if MODEL_TYPE == 'HDC_Net':
-        model = HDC_Net(in_channels=IN_CHANNELS, out_channels=NUM_CLASSES, base_c=32).to(DEVICE)
-    elif MODEL_TYPE == 'FocalTransNet':
-        model = FocalTransNet(img_size=TARGET_SIZE[0], dim_in=IN_CHANNELS, dim_out=NUM_CLASSES, device=str(DEVICE)).to(
-            DEVICE)
-    elif MODEL_TYPE == 'MK_UNet':
-        model = MK_UNet(num_classes=NUM_CLASSES, in_channels=IN_CHANNELS).to(DEVICE)
-    elif MODEL_TYPE == 'UNet':
-        model = UNet(spatial_dims=2, in_channels=IN_CHANNELS, out_channels=NUM_CLASSES,
-                     channels=(32, 64, 128, 256, 512), strides=(2, 2, 2, 2), num_res_units=2).to(DEVICE)
-    elif MODEL_TYPE == 'AttUNet':
-        model = AttentionUnet(spatial_dims=2, in_channels=IN_CHANNELS, out_channels=NUM_CLASSES, channels=(32, 64, 128, 256),
-                              strides=(2, 2, 2, 2)).to(DEVICE)
-    elif MODEL_TYPE == 'TransUNet':
-        model = TransUNet(img_size=TARGET_SIZE[0], in_channels=IN_CHANNELS, num_classes=NUM_CLASSES).to(DEVICE)
-    elif MODEL_TYPE == 'SwinUNet':
-        model = SwinUNet(img_size=TARGET_SIZE[0], num_classes=NUM_CLASSES, in_channels=IN_CHANNELS).to(DEVICE)
-    elif MODEL_TYPE == 'plan4':
-        model = plan4(in_channels=IN_CHANNELS, out_channels=NUM_CLASSES, base_c=32).to(DEVICE)
-    else:
-        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
-
-    # --- 计算 FLOPs 和 Params ---
+    model = model(in_channels=IN_CHANNELS, out_channels=NUM_CLASSES, base_c=32).to(DEVICE)
     dummy_input = torch.randn(1, IN_CHANNELS, TARGET_SIZE[0], TARGET_SIZE[1]).to(DEVICE)
     try:
         macs, params = profile(model, inputs=(dummy_input,), verbose=False)
@@ -535,8 +417,6 @@ def main():
     except Exception as e:
         logger.warning(f"Failed to compute FLOPs: {e}")
         logger.info(f"Model: {MODEL_TYPE} | Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
-
-    # --- Optim & Loss ---
     loss_fn = SuperCombinedLoss(ce_w=0.5, dice_w=0.5).to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
 
@@ -548,8 +428,6 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = GradScaler()
-
-    # --- Loop ---
     best_dice = 0.0
 
     for epoch in range(EPOCHS):
@@ -571,13 +449,6 @@ def main():
             best_dice = val_metrics['dice']
             torch.save(model.state_dict(), os.path.join(OUT_DIR, "best_model.pth"))
             logger.info(f" -> Best Model Saved! (Lesion Dice: {best_dice:.4f})")
-
-    # --- 训练结束汇总 ---
-    logger.info("=" * 50)
-    logger.info(f"Training Finished!")
-    logger.info(f"Best Lesion Dice: {best_dice:.4f}")
-    logger.info("=" * 50)
-
 
 if __name__ == '__main__':
     main()
